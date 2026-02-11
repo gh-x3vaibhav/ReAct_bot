@@ -3,7 +3,6 @@ import logging
 from typing import List, TypedDict
 from dotenv import load_dotenv
 
-# LangChain / LangGraph
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from langchain_core.messages import (
@@ -11,19 +10,14 @@ from langchain_core.messages import (
     HumanMessage,
     AIMessage,
     ToolMessage,
+    SystemMessage,
 )
 
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-# --------------------------------------------------
-# 1. LOAD ENV
-# --------------------------------------------------
 load_dotenv()
 
-# --------------------------------------------------
-# 2. LOGGING
-# --------------------------------------------------
 logging.basicConfig(
     filename="logs.txt",
     level=logging.INFO,
@@ -32,19 +26,12 @@ logging.basicConfig(
 )
 
 def log_step(step_type: str, content: str):
-    output = f"\n[{step_type}]\n{content}"
-    print(output)
-    logging.info(output)
-
-# --------------------------------------------------
-# 3. TOOLS
-# --------------------------------------------------
+    print(f"\n[{step_type}]\n{content}")
+    logging.info(f"\n[{step_type}]\n{content}")
 
 @tool
 def requirement_structure_tool(requirement: str) -> dict:
-    """
-    Takes raw requirement text and confirms understanding.
-    """
+  
     words = requirement.split()
     return {
         "analyzed_length": len(words),
@@ -53,9 +40,7 @@ def requirement_structure_tool(requirement: str) -> dict:
 
 @tool
 def generic_test_generator(action: str, expected_outcome: str) -> List[str]:
-    """
-    Generates generic QA test cases.
-    """
+  
     return [
         f"POSITIVE: Verify user can '{action}' and see '{expected_outcome}'.",
         f"NEGATIVE: Verify '{action}' with empty data does NOT show '{expected_outcome}'.",
@@ -65,9 +50,7 @@ def generic_test_generator(action: str, expected_outcome: str) -> List[str]:
 
 @tool
 def report_formatter(test_cases: List[str]) -> str:
-    """
-    Formats test cases into final report.
-    """
+   
     report = "--- QA AUTOMATION REPORT ---\n"
     for i, tc in enumerate(test_cases, 1):
         report += f"TC_{i:03d}: {tc}\n"
@@ -80,62 +63,49 @@ TOOLS = [
     report_formatter,
 ]
 
-# --------------------------------------------------
-# 4. GEMINI LLM
-# --------------------------------------------------
-
 llm = ChatGoogleGenerativeAI(
     api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
     model="gemini-1.5-flash",
     temperature=0,
-    convert_system_message_to_human=True,
 )
 
 llm_with_tools = llm.bind_tools(TOOLS)
 
-# --------------------------------------------------
-# 5. LANGGRAPH STATE
-# --------------------------------------------------
-
 class AgentState(TypedDict):
     messages: List[BaseMessage]
 
-# --------------------------------------------------
-# 6. GRAPH NODES
-# --------------------------------------------------
+SYSTEM_PROMPT = """
+You are a QA Assistant.
+1. You have tools to analyze requirements, generate tests, and format reports.
+2. DO NOT use tools if the user is just greeting you or asking general questions.
+3. DECIDE which tool to use based on the specific request.
+4. If no tool is needed, just reply with text.
+"""
 
 def llm_node(state: AgentState):
-    """
-    LLM reasoning node
-    """
-    response = llm_with_tools.invoke(state["messages"])
+    messages = state["messages"]
+    
+    if not isinstance(messages[0], SystemMessage):
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    
+    response = llm_with_tools.invoke(messages)
 
     if isinstance(response, AIMessage) and response.content:
         log_step("THOUGHT", response.content)
 
     if isinstance(response, AIMessage) and response.tool_calls:
         for call in response.tool_calls:
-            log_step(
-                "ACTION",
-                f"Tool: {call['name']} | Args: {call['args']}",
-            )
+            log_step("ACTION", f"Tool: {call['name']} | Args: {call['args']}")
 
-    return {"messages": state["messages"] + [response]}
+    return {"messages": [response]}
 
 tool_node = ToolNode(TOOLS)
 
 def route(state: AgentState):
-    """
-    Decide whether to call tools or end.
-    """
     last_msg = state["messages"][-1]
     if isinstance(last_msg, AIMessage) and last_msg.tool_calls:
         return "tools"
     return END
-
-# --------------------------------------------------
-# 7. BUILD GRAPH
-# --------------------------------------------------
 
 graph = StateGraph(AgentState)
 
@@ -157,40 +127,25 @@ graph.add_edge("tools", "llm")
 
 app = graph.compile()
 
-# --------------------------------------------------
-# 8. RUN BOT (CLI)
-# --------------------------------------------------
-
 def run_bot():
-    print("\n" + "=" * 45)
-    print(" 🤖 QA LangGraph Agent (Gemini) Ready ")
-    print("=" * 45)
-
+    print("QEA Agent")
+    
     try:
-        user_input = input("Enter your test scenario: ").strip()
+        user_input = input("Enter your input: ").strip()
         if not user_input:
-            print("Error: Scenario cannot be empty.")
             return
 
-        log_step("INPUT SCENARIO", user_input)
+        log_step("INPUT", user_input)
 
         result = app.invoke(
             {"messages": [HumanMessage(content=user_input)]}
         )
 
-        print("\n FINAL OUTPUT\n")
-        for msg in result["messages"]:
-            if isinstance(msg, ToolMessage):
-                log_step("OBSERVATION", msg.content)
+        print("\nFINAL OUTPUT:")
+        print(result["messages"][-1].content)
 
-    except KeyboardInterrupt:
-        print("\nBot stopped by user.")
     except Exception as e:
-        print(f"\nError: {e}")
-
-# --------------------------------------------------
-# 9. ENTRY POINT
-# --------------------------------------------------
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     run_bot()
